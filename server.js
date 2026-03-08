@@ -9,11 +9,10 @@ const PORT = process.env.PORT || 3000;
 
 app.get('/data', async (req, res) => {
     const tmdbId = req.query.id || "453395";
-    console.log(`\n--- [EXPRESS] Request for ID: ${tmdbId} ---`);
+    console.log(`\n--- [RECORDER] Diagnosing ID: ${tmdbId} ---`);
     
     let browser;
     try {
-        console.log("[BROWSER] Launching optimized Chromium...");
         browser = await puppeteer.launch({
             headless: "new",
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
@@ -22,128 +21,103 @@ app.get('/data', async (req, res) => {
                 '--disable-setuid-sandbox', 
                 '--disable-dev-shm-usage', 
                 '--single-process',
-                '--disable-blink-features=AutomationControlled' // Extra stealth
+                '--disable-blink-features=AutomationControlled'
             ]
         });
 
         const page = await browser.newPage();
 
-        // --- ANTI-DEBUGGER BYPASS ---
-        // This stops the 'debugger' statement from pausing the script
+        // 1. KILL DEBUGGER TRAPS
         const client = await page.target().createCDPSession();
         await client.send('Debugger.enable');
         await client.send('Debugger.setSkipAllPauses', { skip: true });
-        console.log("[BROWSER] Breakpoints/Pauses deactivated.");
 
         await page.setRequestInterception(true);
         let foundM3u8 = null;
 
         page.on('request', (request) => {
-            const url = request.url();
-            if (url.includes('.m3u8')) {
-                console.log(`[INTERCEPTOR] Caught M3U8: ${url.substring(0, 40)}...`);
-                if (!foundM3u8) foundM3u8 = url;
+            if (request.url().includes('.m3u8')) {
+                foundM3u8 = request.url();
             }
-            if (['image', 'stylesheet', 'font'].includes(request.resourceType())) request.abort();
+            // We allow scripts/xhr so we can see the full page state
+            if (['image', 'font'].includes(request.resourceType())) request.abort();
             else request.continue();
         });
 
-        console.log("[ACTION] Navigating to player...");
+        console.log("[RECORDER] Loading player page...");
         await page.goto(`https://player.videasy.net/movie/${tmdbId}?color=FF0000`, { 
             waitUntil: 'networkidle2', timeout: 30000 
         });
 
-        // Small delay for stability
-        await new Promise(r => setTimeout(r, 2500));
-
-        // Click center to trigger decryption math
-        console.log("[ACTION] Triggering player click...");
+        await new Promise(r => setTimeout(r, 3000));
+        
+        // 2. TRY THE CLICK
         await page.mouse.click(400, 300); 
 
-        // Polling loop
         let attempts = 0;
-        while (!foundM3u8 && attempts < 15) {
-            await new Promise(r => setTimeout(r, 600));
+        while (!foundM3u8 && attempts < 10) {
+            await new Promise(r => setTimeout(r, 500));
             attempts++;
         }
 
         if (foundM3u8) {
-            console.log("[EXPRESS] Success. Sending JSON.");
             return res.json({ success: true, url: foundM3u8 });
         }
 
-        // --- FALLBACK: RETURN FULL HTML DECRYPTER ---
-        console.warn("[EXPRESS] No link caught. Sending HTML Bridge Fallback.");
+        // --- 3. DIAGNOSTIC CAPTURE ---
+        console.log("[RECORDER] Capture initiated: No link found.");
+        
+        // Capture the DOM state
+        const htmlDump = await page.content();
+        // Capture a screenshot as a Base64 string
+        const screenshot = await page.screenshot({ encoding: 'base64', fullPage: true });
+
         res.header("Content-Type", "text/html");
-        res.send(generateFallbackHtml(tmdbId));
+        res.send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Server-Side Diagnostic Dump</title>
+                <style>
+                    body { background: #121212; color: #fff; font-family: sans-serif; padding: 20px; }
+                    .panel { background: #1e1e1e; border: 1px solid #333; padding: 20px; margin-bottom: 20px; border-radius: 8px; }
+                    h2 { color: #ff5252; }
+                    img { max-width: 100%; border: 2px solid #555; }
+                    textarea { width: 100%; height: 300px; background: #000; color: #0f0; font-family: monospace; }
+                </style>
+            </head>
+            <body>
+                <h2>Diagnostic Report: Link Not Found</h2>
+                <p>This is exactly what the browser on the server saw before giving up.</p>
+                
+                <div class="panel">
+                    <h3>Visual Screenshot</h3>
+                    <img src="data:image/png;base64,${screenshot}" />
+                </div>
+
+                <div class="panel">
+                    <h3>Full HTML Source (Live State)</h3>
+                    <p>Search for "debugger", "blocked", or "error" in this text:</p>
+                    <textarea readonly>${htmlDump.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
+                </div>
+
+                <div class="panel">
+                    <h3>Possible Reasons:</h3>
+                    <ul>
+                        <li><strong>Anti-Bot:</strong> If the screenshot shows a blank page or a cloudflare challenge.</li>
+                        <li><strong>Breakpoint Loop:</strong> If the HTML contains infinite loops of <code>Function("debugger")()</code>.</li>
+                        <li><strong>Region Block:</strong> If the screenshot shows "Not available in your country".</li>
+                    </ul>
+                </div>
+            </body>
+            </html>
+        `);
 
     } catch (err) {
-        console.error(`[ERROR] ${err.message}`);
-        res.status(500).send(`Error: ${err.message}`);
+        res.status(500).send(`Browser Crash: ${err.message}`);
     } finally {
         if (browser) await browser.close();
     }
 });
 
-function generateFallbackHtml(id) {
-    return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Manual Bridge - ${id}</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
-        <style>
-            body { background: #000; color: #00ff41; font-family: 'Courier New', monospace; padding: 40px; text-align: center; }
-            .box { border: 1px solid #333; padding: 20px; display: inline-block; border-radius: 8px; background: #0a0a0a; }
-            .loader { border: 3px solid #111; border-top: 3px solid #00ff41; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 15px auto; }
-            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-            #res { margin-top: 20px; color: #fff; text-align: left; background: #111; padding: 10px; border-radius: 4px; display: none; word-break: break-all; }
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h3>Automated Capture Failed</h3>
-            <p>Running Client-Side Decryption Bridge...</p>
-            <div class="loader" id="loader"></div>
-            <div id="status">Fetching encrypted sources...</div>
-            <pre id="res"></pre>
-        </div>
-
-        <script>
-            const TMDB_ID = "${id}";
-            const AES_KEY = "b35ebba4";
-
-            async function start() {
-                const status = document.getElementById('status');
-                const resBox = document.getElementById('res');
-                try {
-                    status.innerText = "Step 1: Fetching API data...";
-                    const apiRes = await fetch("https://api.videasy.net/myflixerzupcloud/sources-with-title?tmdbId=" + TMDB_ID);
-                    const hex = (await apiRes.text()).replace(/['"]/g, '');
-
-                    status.innerText = "Step 2: Replicating WASM math...";
-                    // Using the pure JS logic we built earlier
-                    const bytes = hex.match(/.{1,2}/g).map(b => parseInt(b, 16));
-                    const xored = bytes.map((b, i) => b ^ TMDB_ID.charCodeAt(i % TMDB_ID.length));
-                    const b64 = btoa(String.fromCharCode(...xored));
-
-                    status.innerText = "Step 3: Final AES layer...";
-                    const decrypted = CryptoJS.AES.decrypt(b64, AES_KEY).toString(CryptoJS.enc.Utf8);
-                    
-                    document.getElementById('loader').style.display = 'none';
-                    status.innerText = "DECRYPTION SUCCESSFUL:";
-                    resBox.style.display = "block";
-                    resBox.innerText = JSON.stringify(JSON.parse(decrypted), null, 2);
-                } catch (e) {
-                    status.style.color = "red";
-                    status.innerText = "Critical Fail: " + e.message;
-                }
-            }
-            start();
-        </script>
-    </body>
-    </html>
-    `;
-}
-
-app.listen(PORT, () => console.log(`🚀 API active on ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Forensic Server active on ${PORT}`));
