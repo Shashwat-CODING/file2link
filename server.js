@@ -8,89 +8,142 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/data', async (req, res) => {
-    console.log("[*] Request received for TMDB 453395...");
+    const tmdbId = req.query.id || "453395";
+    console.log(`\n--- [EXPRESS] Request for ID: ${tmdbId} ---`);
     
     let browser;
     try {
+        console.log("[BROWSER] Launching optimized Chromium...");
         browser = await puppeteer.launch({
             headless: "new",
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
             args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage', // Uses /tmp instead of memory for shared memory
-                '--disable-gpu',            // Saves memory on headless servers
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process'         // Forces one process to save RAM
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--single-process',
+                '--disable-blink-features=AutomationControlled' // Extra stealth
             ]
         });
 
         const page = await browser.newPage();
-        
-        // Block heavy assets to save memory/bandwidth
+
+        // --- ANTI-DEBUGGER BYPASS ---
+        // This stops the 'debugger' statement from pausing the script
+        const client = await page.target().createCDPSession();
+        await client.send('Debugger.enable');
+        await client.send('Debugger.setSkipAllPauses', { skip: true });
+        console.log("[BROWSER] Breakpoints/Pauses deactivated.");
+
         await page.setRequestInterception(true);
         let foundM3u8 = null;
 
         page.on('request', (request) => {
             const url = request.url();
-            const type = request.resourceType();
-
-            // Intercept the stream link
-            if (url.includes('.m3u8') && !foundM3u8) {
-                console.log("[+] Found m3u8:", url);
-                foundM3u8 = url;
+            if (url.includes('.m3u8')) {
+                console.log(`[INTERCEPTOR] Caught M3U8: ${url.substring(0, 40)}...`);
+                if (!foundM3u8) foundM3u8 = url;
             }
-
-            // Block images, CSS, and fonts to save memory
-            if (['image', 'stylesheet', 'font', 'other'].includes(type)) {
-                request.abort();
-            } else {
-                request.continue();
-            }
+            if (['image', 'stylesheet', 'font'].includes(request.resourceType())) request.abort();
+            else request.continue();
         });
 
-        const targetUrl = "https://player.videasy.net/movie/453395?color=FF0000";
-        
-        // Navigate
-        await page.goto(targetUrl, { 
-            waitUntil: 'networkidle2', 
-            timeout: 60000 
+        console.log("[ACTION] Navigating to player...");
+        await page.goto(`https://player.videasy.net/movie/${tmdbId}?color=FF0000`, { 
+            waitUntil: 'networkidle2', timeout: 30000 
         });
 
-        // Small delay to ensure scripts are ready
-        await new Promise(r => setTimeout(r, 2000));
+        // Small delay for stability
+        await new Promise(r => setTimeout(r, 2500));
 
-        // Click center to trigger WASM decryption & stream request
-        const { width, height } = await page.evaluate(() => ({
-            width: window.innerWidth,
-            height: window.innerHeight
-        }));
-        
-        console.log(`[*] Triggering click at ${width/2}, ${height/2}`);
-        await page.mouse.click(width / 2, height / 2);
+        // Click center to trigger decryption math
+        console.log("[ACTION] Triggering player click...");
+        await page.mouse.click(400, 300); 
 
-        // Polling for the intercepted URL
-        let timeoutCount = 0;
-        while (!foundM3u8 && timeoutCount < 20) {
-            await new Promise(r => setTimeout(r, 500));
-            timeoutCount++;
+        // Polling loop
+        let attempts = 0;
+        while (!foundM3u8 && attempts < 15) {
+            await new Promise(r => setTimeout(r, 600));
+            attempts++;
         }
 
         if (foundM3u8) {
-            res.json({ success: true, url: foundM3u8 });
-        } else {
-            res.status(404).json({ success: false, error: "Stream link not found" });
+            console.log("[EXPRESS] Success. Sending JSON.");
+            return res.json({ success: true, url: foundM3u8 });
         }
 
+        // --- FALLBACK: RETURN FULL HTML DECRYPTER ---
+        console.warn("[EXPRESS] No link caught. Sending HTML Bridge Fallback.");
+        res.header("Content-Type", "text/html");
+        res.send(generateFallbackHtml(tmdbId));
+
     } catch (err) {
-        console.error("[!] Error:", err.message);
-        res.status(500).json({ success: false, error: err.message });
+        console.error(`[ERROR] ${err.message}`);
+        res.status(500).send(`Error: ${err.message}`);
     } finally {
         if (browser) await browser.close();
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 API active on port ${PORT}`);
-});
+function generateFallbackHtml(id) {
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manual Bridge - ${id}</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+        <style>
+            body { background: #000; color: #00ff41; font-family: 'Courier New', monospace; padding: 40px; text-align: center; }
+            .box { border: 1px solid #333; padding: 20px; display: inline-block; border-radius: 8px; background: #0a0a0a; }
+            .loader { border: 3px solid #111; border-top: 3px solid #00ff41; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 15px auto; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            #res { margin-top: 20px; color: #fff; text-align: left; background: #111; padding: 10px; border-radius: 4px; display: none; word-break: break-all; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h3>Automated Capture Failed</h3>
+            <p>Running Client-Side Decryption Bridge...</p>
+            <div class="loader" id="loader"></div>
+            <div id="status">Fetching encrypted sources...</div>
+            <pre id="res"></pre>
+        </div>
+
+        <script>
+            const TMDB_ID = "${id}";
+            const AES_KEY = "b35ebba4";
+
+            async function start() {
+                const status = document.getElementById('status');
+                const resBox = document.getElementById('res');
+                try {
+                    status.innerText = "Step 1: Fetching API data...";
+                    const apiRes = await fetch("https://api.videasy.net/myflixerzupcloud/sources-with-title?tmdbId=" + TMDB_ID);
+                    const hex = (await apiRes.text()).replace(/['"]/g, '');
+
+                    status.innerText = "Step 2: Replicating WASM math...";
+                    // Using the pure JS logic we built earlier
+                    const bytes = hex.match(/.{1,2}/g).map(b => parseInt(b, 16));
+                    const xored = bytes.map((b, i) => b ^ TMDB_ID.charCodeAt(i % TMDB_ID.length));
+                    const b64 = btoa(String.fromCharCode(...xored));
+
+                    status.innerText = "Step 3: Final AES layer...";
+                    const decrypted = CryptoJS.AES.decrypt(b64, AES_KEY).toString(CryptoJS.enc.Utf8);
+                    
+                    document.getElementById('loader').style.display = 'none';
+                    status.innerText = "DECRYPTION SUCCESSFUL:";
+                    resBox.style.display = "block";
+                    resBox.innerText = JSON.stringify(JSON.parse(decrypted), null, 2);
+                } catch (e) {
+                    status.style.color = "red";
+                    status.innerText = "Critical Fail: " + e.message;
+                }
+            }
+            start();
+        </script>
+    </body>
+    </html>
+    `;
+}
+
+app.listen(PORT, () => console.log(`🚀 API active on ${PORT}`));
