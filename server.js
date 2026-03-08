@@ -5,83 +5,92 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.get('/data', async (req, res) => {
-    console.log("[*] Request received. Launching browser...");
+    console.log("[*] Request received for TMDB 453395...");
     
     let browser;
     try {
         browser = await puppeteer.launch({
-            headless: true, // Set to false if you want to watch it work
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: "new",
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage', // Uses /tmp instead of memory for shared memory
+                '--disable-gpu',            // Saves memory on headless servers
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'         // Forces one process to save RAM
+            ]
         });
 
         const page = await browser.newPage();
         
-        // Target URL
-        const targetUrl = "https://player.videasy.net/movie/453395?color=FF0000";
+        // Block heavy assets to save memory/bandwidth
+        await page.setRequestInterception(true);
         let foundM3u8 = null;
 
-        // --- NETWORK INTERCEPTION ---
-        // We listen to every request the page makes
-        await page.setRequestInterception(true);
-        page.on('request', request => {
+        page.on('request', (request) => {
             const url = request.url();
-            
-            // Check if this is the master playlist or a stream chunk
+            const type = request.resourceType();
+
+            // Intercept the stream link
             if (url.includes('.m3u8') && !foundM3u8) {
-                console.log("[+] Intercepted m3u8:", url);
+                console.log("[+] Found m3u8:", url);
                 foundM3u8 = url;
             }
-            request.continue();
+
+            // Block images, CSS, and fonts to save memory
+            if (['image', 'stylesheet', 'font', 'other'].includes(type)) {
+                request.abort();
+            } else {
+                request.continue();
+            }
         });
 
-        // Navigate to the player
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        const targetUrl = "https://player.videasy.net/movie/453395?color=FF0000";
+        
+        // Navigate
+        await page.goto(targetUrl, { 
+            waitUntil: 'networkidle2', 
+            timeout: 60000 
+        });
 
-        // Wait a moment for any overlay/ads to settle
+        // Small delay to ensure scripts are ready
         await new Promise(r => setTimeout(r, 2000));
 
-        // --- SIMULATE CENTER CLICK ---
-        // Most players require a user gesture to start the stream/decryption
-        const { width, height } = await page.evaluate(() => {
-            return { width: window.innerWidth, height: window.innerHeight };
-        });
-
-        console.log(`[*] Clicking center: ${width / 2}, ${height / 2}`);
+        // Click center to trigger WASM decryption & stream request
+        const { width, height } = await page.evaluate(() => ({
+            width: window.innerWidth,
+            height: window.innerHeight
+        }));
+        
+        console.log(`[*] Triggering click at ${width/2}, ${height/2}`);
         await page.mouse.click(width / 2, height / 2);
 
-        // Wait for the network request to be triggered after the click
-        // We give it up to 10 seconds to find the link
-        let attempts = 0;
-        while (!foundM3u8 && attempts < 20) {
+        // Polling for the intercepted URL
+        let timeoutCount = 0;
+        while (!foundM3u8 && timeoutCount < 20) {
             await new Promise(r => setTimeout(r, 500));
-            attempts++;
+            timeoutCount++;
         }
 
         if (foundM3u8) {
-            res.json({
-                success: true,
-                url: foundM3u8,
-                tmdbId: "453395"
-            });
+            res.json({ success: true, url: foundM3u8 });
         } else {
-            res.status(404).json({
-                success: false,
-                error: "Stream URL not found within timeout."
-            });
+            res.status(404).json({ success: false, error: "Stream link not found" });
         }
 
-    } catch (error) {
-        console.error("[!] Error:", error.message);
-        res.status(500).json({ success: false, error: error.message });
+    } catch (err) {
+        console.error("[!] Error:", err.message);
+        res.status(500).json({ success: false, error: err.message });
     } finally {
         if (browser) await browser.close();
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`\n🚀 Server running at http://localhost:${PORT}`);
-    console.log(`🔗 Call http://localhost:${PORT}/data to get the m3u8 URL\n`);
+    console.log(`🚀 API active on port ${PORT}`);
 });
